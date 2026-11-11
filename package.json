@@ -1,0 +1,32 @@
+{
+  "name": "wrapped_campaing_gen",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/server.ts",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "preview": "tsx scripts/preview.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1164.0",
+    "@napi-rs/canvas": "^1.1.0",
+    "csv-parse": "^7.0.3",
+    "p-limit": "^7.3.3",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.159.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
