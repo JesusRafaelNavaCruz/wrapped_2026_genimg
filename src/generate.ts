@@ -18,7 +18,7 @@ const background = () => (bgPromise ??= loadImage(path.join(ASSETS, "background_
 // Layout (todo en px @2x; se muestra a 668×332 en el correo)
 // ---------------------------------------------------------------------------
 export const W = 1336;
-export const H = 664;
+export const H = 700;
 
 const SKY_TOP = "#14A3F2";
 const SKY_BOTTOM = "#00C6FF";
@@ -134,6 +134,7 @@ async function baseCanvas() {
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext("2d");
 
+  // Agrega el gradient bg
   const sky = ctx.createLinearGradient(0, 0, 0, H);
   sky.addColorStop(0, SKY_TOP);
   sky.addColorStop(1, SKY_BOTTOM);
