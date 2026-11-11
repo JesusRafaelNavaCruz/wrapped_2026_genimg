@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: wrapped-2026-genimg
+    runtime: node
+    plan: starter # el plan free se duerme tras 15 min sin tráfico (ver README/notas)
+    region: oregon
+    branch: master
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: CACHE_MAX
+        value: "2000"
