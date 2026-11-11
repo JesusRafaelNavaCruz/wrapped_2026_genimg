@@ -1,43 +1,91 @@
 import http from "node:http";
-import { renderKM, renderDefault, KM_PATTERN } from "./generate";
+import { renderKM, renderRadar, renderDefault, normalizeName, KM_PATTERN, type Rendered } from "./generate";
 
 const PORT = Number(process.env.PORT ?? 3000);
-const CACHE_MAX = Number(process.env.CACHE_MAX ?? 2000); // ~27 KB c/u ≈ 54 MB máx.
+// Límite de la caché en memoria, en MB (el radar pesa ~150-220 KB por imagen).
+const CACHE_MAX_BYTES = Number(process.env.CACHE_MAX_MB ?? 150) * 1024 * 1024;
 
-// Caché en memoria (LRU simple usando el orden de inserción del Map).
-// Guardamos la Promise para que peticiones simultáneas del mismo km rendericen una sola vez.
-const cache = new Map<number, Promise<Buffer>>();
+// ---------------------------------------------------------------------------
+// Caché LRU por bytes. Guardamos la Promise para que peticiones simultáneas
+// de la misma imagen la rendericen una sola vez.
+// ---------------------------------------------------------------------------
+const cache = new Map<string, Promise<Rendered>>();
+const sizes = new Map<string, number>();
+let cachedBytes = 0;
 
-function getImage(km: number): Promise<Buffer> {
-  const hit = cache.get(km);
+function evict() {
+  while (cachedBytes > CACHE_MAX_BYTES && cache.size > 0) {
+    const oldest = cache.keys().next().value!;
+    cache.delete(oldest);
+    cachedBytes -= sizes.get(oldest) ?? 0;
+    sizes.delete(oldest);
+  }
+}
+
+function cached(key: string, render: () => Promise<Rendered>): Promise<Rendered> {
+  const hit = cache.get(key);
   if (hit) {
-    cache.delete(km);
-    cache.set(km, hit); // marcar como reciente
+    cache.delete(key);
+    cache.set(key, hit); // marcar como reciente
     return hit;
   }
-  const p = renderKM(km);
-  p.catch(() => cache.delete(km)); // no cachear errores
-  cache.set(km, p);
-  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value!);
+  const p = render();
+  cache.set(key, p);
+  p.then(
+    (r) => {
+      if (cache.get(key) !== p) return; // ya fue desalojada
+      sizes.set(key, r.body.length);
+      cachedBytes += r.body.length;
+      evict();
+    },
+    () => cache.delete(key), // no cachear errores
+  );
   return p;
 }
 
-let defaultPng: Promise<Buffer> | undefined;
-const getDefault = () => (defaultPng ??= renderDefault());
+let defaultImg: Promise<Rendered> | undefined;
+const getDefault = () => (defaultImg ??= renderDefault());
 
-function sendPng(res: http.ServerResponse, png: Buffer, cacheControl: string, head: boolean) {
+// ---------------------------------------------------------------------------
+// Resolución de parámetros
+//   ?km=20566               -> tarjeta de km
+//   ?radar=Rafael           -> radar con saludo
+//   ?radar=Rafael&km=20566  -> radar + km en una sola imagen
+//   ?radar= (vacío/inválido)-> radar con "¡Hola!" (y km si es válido)
+//   nada válido             -> imagen genérica
+// ---------------------------------------------------------------------------
+type Job = { key: string; render: () => Promise<Rendered> } | null;
+
+function resolveJob(url: URL): Job {
+  const rawKm = url.searchParams.get("km") ?? url.pathname.match(/^\/(\d{1,6})\.png$/)?.[1] ?? "";
+  const km = KM_PATTERN.test(rawKm) ? Number(rawKm) : null;
+
+  if (url.searchParams.has("radar")) {
+    const name = normalizeName(url.searchParams.get("radar") ?? "");
+    return { key: `radar|${name}|${km ?? ""}`, render: () => renderRadar(name, km) };
+  }
+  if (km !== null) {
+    return { key: `km|${km}`, render: () => renderKM(km) };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// HTTP
+// ---------------------------------------------------------------------------
+const IMMUTABLE = "public, max-age=31536000, immutable";
+const SHORT = "public, max-age=300"; // el default no se cachea para siempre
+
+function send(res: http.ServerResponse, img: Rendered, cacheControl: string, head: boolean) {
   res.writeHead(200, {
-    "Content-Type": "image/png",
-    "Content-Length": png.length,
+    "Content-Type": img.type,
+    "Content-Length": img.body.length,
     "Cache-Control": cacheControl,
     "Access-Control-Allow-Origin": "*",
     "X-Content-Type-Options": "nosniff",
   });
-  res.end(head ? undefined : png);
+  res.end(head ? undefined : img.body);
 }
-
-const IMMUTABLE = "public, max-age=31536000, immutable";
-const SHORT = "public, max-age=300"; // el default no se cachea para siempre
 
 const server = http.createServer(async (req, res) => {
   const started = performance.now();
@@ -54,34 +102,37 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Acepta "/?km=20566" (formato del correo) y "/20566.png" (útil para probar en el navegador).
+  // Acepta "/?..." (formato del correo) y "/20566.png" (útil para probar en el navegador).
   if (url.pathname !== "/" && !/^\/\d{1,6}\.png$/.test(url.pathname)) {
     res.writeHead(404, { "Content-Type": "text/plain" }).end("not found");
     return;
   }
-  const raw = url.searchParams.get("km") ?? url.pathname.match(/^\/(\d{1,6})\.png$/)?.[1] ?? "";
+
+  const job = resolveJob(url);
+  // En logs no escribimos el nombre (dato personal); solo el tipo de imagen.
+  const label = job ? job.key.split("|")[0] : "default";
 
   try {
-    if (KM_PATTERN.test(raw)) {
-      sendPng(res, await getImage(Number(raw)), IMMUTABLE, head);
+    if (job) {
+      send(res, await cached(job.key, job.render), IMMUTABLE, head);
     } else {
-      // km inválido o ausente: devolvemos la imagen genérica con 200,
+      // Parámetros inválidos o ausentes: imagen genérica con 200,
       // para que el cliente de correo nunca muestre una imagen rota.
-      sendPng(res, await getDefault(), SHORT, head);
+      send(res, await getDefault(), SHORT, head);
     }
   } catch (err) {
-    console.error(`[error] km=${raw}`, err);
+    console.error(`[error] ${label}`, err);
     try {
-      sendPng(res, await getDefault(), "no-store", head);
+      send(res, await getDefault(), "no-store", head);
     } catch {
       res.writeHead(500).end();
     }
   }
 
-  console.log(`${req.method} ${url.pathname}${url.search} -> ${res.statusCode} ${(performance.now() - started).toFixed(0)}ms`);
+  console.log(`${req.method} ${label} -> ${res.statusCode} ${(performance.now() - started).toFixed(0)}ms`);
 });
 
 server.listen(PORT, () => {
-  console.log(`Servidor de imágenes en http://localhost:${PORT}/?km=20566`);
+  console.log(`Servidor de imágenes en http://localhost:${PORT}/?km=20566&radar=Rafael`);
   void getDefault(); // precalentar
 });
